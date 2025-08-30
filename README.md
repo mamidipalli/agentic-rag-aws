@@ -3,11 +3,11 @@
 Production‑grade reference showing Agentic RAG on AWS with **LangGraph**, **Amazon Bedrock**, **RDS for PostgreSQL + pgvector**, and secure APIs via **API Gateway + Lambda + Cognito**.  
 Includes **auto‑ingestion**, feedback (HITL), metrics, and infra as code with **CDK**.
 
-Demo uses `.txt`/`.md` docs in S3 for simplicity. Real deployments typically pull from Confluence, PDFs, or web pages — see the *Ingestion* section for how to enable BeautifulSoup and PyPDF.
+Supports `.txt`/`.md`/`.html` and text-based /`.pdf`. See *Ingestion* for parsing notes (BeautifulSoup for HTML, pypdf for PDFs) and how to add DOCX/OCR.
 
 ---
 
-## ✨ What you get
+## ✨ Reference stack highlights
 
 - **Agent graph (LangGraph):** Router → Retriever → Reasoner → Tool‑Caller  
 - **RAG:** Bedrock text embeddings + pgvector similarity search  
@@ -75,16 +75,16 @@ Functional view:
 │     ├─ stacks/agentic_rag_stack.py   # VPC, S3(+events), SQS(+DLQ), EventBridge, RDS, Lambdas, API GW, Cognito
 │     ├─ requirements.txt
 │     └─ cdk.json
-├─ sample-docs/              # Demo docs (txt/md) under corp/
+├─ sample-docs/              # Sample docs (txt/md/html/pdf) under corp/
 │  └─ *.md
 │  └─ *.txt
+   └─ *.html
+   └─ *.pdf
 ├─ scripts/
 │  ├─ get_cognito_jwt.sh     # Fetch ID/Access token via Cognito
-│  ├─ upload_sample_docs.sh  # Sync sample docs to S3
-│  └─ nightly_eval_job.py    # (optional) evals sketch
 ├─ docs/
-│  └─ functional-architecture.png  # (exported image; add your file here)
-├─ tests/
+│  └─ architecture-functional.png
+   └─ architecture-infrastructure.png
 └─ README.md
 ```
 
@@ -138,7 +138,7 @@ Vector dimension in schema must match the embedding model (**Titan v2 = 1024**).
 
 ---
 
-## 📥 Load demo documents
+## 📥 Load some documents
 
 ### Option A — auto‑ingest (recommended)
 
@@ -459,12 +459,3 @@ Released under the [MIT License](./LICENSE). © 2025 Ravi Mamidipalli.
 ## 🙋 Support / Questions
 
 Open an issue or ping me. Contributions welcome!
-
----
-
-### Appendix: Why `.txt`/`.md` in the demo?
-
-Keeps the demo minimal and reproducible without extra system deps.  
-To ingest Confluence, pull page HTML via API and parse with BeautifulSoup (strip nav, keep body, convert to text).  
-To ingest PDF, extract with `pypdf` (or `pdfminer.six`) before chunking.  
-Everything else in the pipeline (chunk → embed → upsert vectors) stays the same.
