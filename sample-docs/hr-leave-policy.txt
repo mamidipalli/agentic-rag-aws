@@ -1,0 +1,5 @@
+HR Leave Policy (Summary)
+- Annual Leave: 18 days/year, accrues monthly.
+- Sick Leave: 10 days/year, medical certificate required beyond 2 days.
+- Comp Off: Manager approval required within 30 days of extra work.
+- Apply via Workday > Time Off. Emergencies: inform manager on Slack.

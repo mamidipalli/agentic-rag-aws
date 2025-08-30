@@ -1,0 +1,11 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "agentic_rag": {
+      "project_name": "agentic-rag-aws",
+      "nat_gateways": 1,
+      "db_name": "ragdb",
+      "use_nat": true
+    }
+  }
+}
