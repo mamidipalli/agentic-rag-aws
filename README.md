@@ -3,13 +3,13 @@
 Production‑grade reference showing Agentic RAG on AWS with **LangGraph**, **Amazon Bedrock**, **RDS for PostgreSQL + pgvector**, and secure APIs via **API Gateway + Lambda + Cognito**.  
 Includes **auto‑ingestion**, feedback (HITL), metrics, and infra as code with **CDK**.
 
-Supports `.txt`/`.md`/`.html` and text-based /`.pdf`. See *Ingestion* for parsing notes (BeautifulSoup for HTML, pypdf for PDFs) and how to add DOCX/OCR.
+Supports `.txt`/`.md`/`.html` and text-based /`.pdf`. See *Ingestion* for parsing notes (BeautifulSoup for HTML, pypdf for PDFs) and how to add DOCX/OCR for scanned documents.
 
 ---
 
 ## ✨ Reference stack highlights
 
-- **Agent graph (LangGraph):** Router → Retriever → Reasoner → Tool‑Caller  
+- **Agent graph (LangGraph):** embed → retrieve → select_doc → gate → (reason | abstain_out). Single-doc citation; abstains when evidence is weak.
 - **RAG:** Bedrock text embeddings + pgvector similarity search  
 - **Secure API:** API Gateway + Lambda protected by Cognito (JWTs)  
 - **Auto‑ingest:** S3 ObjectCreated → SQS → Lambda ingest (+ optional nightly backfill by EventBridge)  
@@ -29,7 +29,7 @@ Functional view:
 **Data flow**  
 - **Auto‑ingest:** Admin drops docs in S3 → S3 `ObjectCreated` event → SQS → *Ingest Lambda* reads S3 → chunk → embed (Bedrock Titan Embed v2) → upsert doc & chunks into Postgres `pgvector` (idempotent).  
 - **Nightly backfill (optional):** EventBridge Schedule invokes Ingest Lambda to reconcile a prefix (e.g., `corp/`) and pick up missed/updated objects.  
-- **/ask:** API Gateway (Cognito authorizer; use `ID_TOKEN`) → *ApiFn* (FastAPI + Mangum) → LangGraph (Router → Retriever → Reasoner → Tool‑Caller). Retriever runs pgvector **ANN** search, Reasoner synthesizes an answer, and tools (optional) are called via API.  
+- **/ask:** API Gateway (Cognito authorizer; use `ID_TOKEN`) → *ApiFn* (FastAPI + Mangum) → LangGraph (**embed → retrieve → select_doc → gate → reason | abstain_out). Retriever runs pgvector **ANN** search, **reason** composes a grounded answer with a single S3-URI citation. Tool/API nodes are **not enabled by default** (see Extensions).  
 - **/feedback:** API → *ApiFn* → insert into `feedback` table for evals.  
 - **Observability:** Lambdas emit logs/metrics to CloudWatch; Secrets come from Secrets Manager.
 
@@ -39,9 +39,9 @@ Functional view:
 
 - **Postgres + pgvector:** Simple, portable vector store with strong SQL. No extra service to run.  
 - **Bedrock:** Managed access to multiple FMs; **Titan Embed v2** is fast, cost‑efficient.  
-- **LangGraph:** Declarative agent graphs with tools/branches and retry policies.  
+- **LangGraph:** Declarative agent graphs with branches and retry policies. In this build, the graph implements a retrieval→reason path with an abstain branch; tool/API nodes are optional extensions.  
 - **API GW + Lambda + Cognito:** Quick to secure, serverless scale, easy JWT auth from curl or apps.  
-- **VPC endpoints (optional):** Avoid NAT costs by keeping traffic on AWS private network.
+- **Egress via NAT (default):** One NAT Gateway is provisioned; VPC interface endpoints are a production option you can add later to reduce egress and tighten egress control.
 
 ---
 
@@ -164,11 +164,21 @@ curl -s -X POST "${ApiUrl}admin/ingest" \
   -d '{"s3_bucket":"'"$DocsBucketName"'","s3_prefix":"corp/","chunk_size":900,"chunk_overlap":150}'
 # → {"ok":true,"ingested_files":N}
 ```
+> **Heads-up (API timeout):** API Gateway REST integrations have a hard **29-second** timeout.
+> Use the HTTP `/admin/ingest` route for **small prefixes** (a few files).
+> For larger backfills, prefer the **direct Lambda invoke** or the **nightly EventBridge** path below.
+> If a run exceeds 29s, the client may see **504 Gateway Timeout**, but **the Lambda continues running**. Check `/aws/lambda/<IngestFn>` logs.
+
 
 **Real‑world sources:**  
-- **Confluence/HTML:** fetch content, parse with BeautifulSoup.  
+- **Wiki/portal pages (HTML):** fetch content via API or export, then parse with BeautifulSoup.  
 - **PDFs:** extract with `pypdf` (or `pdfminer.six`).  
 Extend `ingest_handler.py` parsing then keep the chunking/embedding pipeline unchanged.
+
+**Which method should I use?**
+- Few files, quick test → **HTTP**: `POST ${ApiUrl}admin/ingest`
+- Many files / large PDFs → **Lambda invoke** (no 29s limit)
+- Ongoing sync → **EventBridge** nightly backfill (already included in the stack)
 
 ---
 
@@ -242,11 +252,15 @@ curl -s -X POST "${ApiUrl}feedback" \
 
 ## 🧠 Agent Graph (LangGraph)
 
-- **Router:** classify intent (plain QA vs. tool call)  
-- **Retriever:** pgvector ANN search (+ optional metadata filters)  
-- **Reasoner:** compose cited answer within context limits  
-- **Tool‑Caller:** guarded external REST calls via API GW  
-- **Guardrails:** token caps, simple PII/profanity filters, retries
+- **embed:** Create the query embedding via Bedrock and store it as `query_emb`.
+- **retrieve:** Run K-NN over pgvector (ANN) to get a coarse set of hits across documents.
+- **select_doc:** Vote by `doc_uri`, tie-break by best cosine distance, keep top `DOC_CTX_CHUNKS` chunks from the chosen doc, and compute `best_dist`.
+- **gate:** If `best_dist` > `MAX_COSINE_DIST` or fewer than `MIN_CTX_HITS` chunks are available, set `abstain=true`.
+- **reason:** Build a compact context from the selected chunks, call the LLM (Bedrock), and return a concise answer with a single S3-URI citation plus `debug`.
+- **abstain_out:** Return “I don’t know that yet based on the current knowledge base.” Include `debug` for tuning.
+
+**Tunables:** `MAX_COSINE_DIST`, `MIN_CTX_HITS`, `DOC_CTX_CHUNKS` (set via CDK).  
+**Not enabled by default (extensions):** clarifying follow-up node(s), tool/API call node.
 
 ---
 
@@ -273,14 +287,37 @@ Provisioned by CDK via a small init Lambda/Custom Resource:
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- docs (keeps a short preview and unique URI)
 CREATE TABLE IF NOT EXISTS docs (
   id BIGSERIAL PRIMARY KEY,
   doc_uri TEXT,
   content TEXT,
+  preview TEXT,
   meta JSONB
 );
 
--- Titan v2 text embeddings are 1024 dims; change if you use a different model
+-- Ensure preview exists (for upgrades)
+ALTER TABLE docs ADD COLUMN IF NOT EXISTS preview TEXT;
+
+-- Backfill preview from content if needed
+UPDATE docs
+   SET preview = LEFT(content, 2000)
+ WHERE preview IS NULL
+   AND content IS NOT NULL;
+
+-- Make doc_uri unique (idempotent)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.docs'::regclass
+      AND conname = 'docs_doc_uri_key'
+  ) THEN
+    ALTER TABLE public.docs ADD CONSTRAINT docs_doc_uri_key UNIQUE (doc_uri);
+  END IF;
+END $$;
+
+-- doc_chunks (Titan v2 embeddings are 1024 dims)
 CREATE TABLE IF NOT EXISTS doc_chunks (
   id BIGSERIAL PRIMARY KEY,
   doc_id BIGINT REFERENCES docs(id) ON DELETE CASCADE,
@@ -294,15 +331,18 @@ CREATE TABLE IF NOT EXISTS feedback (
   session_id TEXT,
   query TEXT,
   answer TEXT,
-  rating INT,         -- -1,0,1
+  rating INT,
   notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ANN + metadata indexes
 CREATE INDEX IF NOT EXISTS doc_chunks_embedding_idx
-  ON doc_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-CREATE INDEX IF NOT EXISTS doc_chunks_meta_gin ON doc_chunks USING gin (meta);
+  ON doc_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 200);
+
+CREATE INDEX IF NOT EXISTS doc_chunks_meta_gin
+  ON doc_chunks USING gin (meta);
+
 ANALYZE doc_chunks;
 ```
 
@@ -347,6 +387,7 @@ aws secretsmanager get-secret-value \
   ```bash
   aws logs tail "/aws/lambda/$API_FN" --since 15m --follow --region ap-south-1
   ```
+- **504 on** /admin/ingest: API Gateway times out at **29s**. The Lambda keeps running. Check /aws/lambda/<IngestFn> logs or use the **Lambda invoke** method for long backfills.
 - **`operator does not exist: vector <=> double precision[]`:** Ensure  
   - `CREATE EXTENSION vector` ran,  
   - `embedding` column is `VECTOR(dim)`, and  
@@ -377,9 +418,9 @@ aws secretsmanager get-secret-value \
 
 ## 🌐 NAT vs. VPC Endpoints
 
-Default: **NAT Gateway** for outbound calls (simpler).  
-Cheaper option: **Disable NAT** and add VPC **interface endpoints** (Secrets Manager, Bedrock, Bedrock Runtime, Logs, SSM/ECS messages, etc.).  
-The CDK stack includes a toggle to create endpoints and route Lambda traffic privately.
+Default: **one NAT Gateway** for outbound service calls (simpler, matches the CDK stack today).  
+Production option: add **VPC interface endpoints** (e.g., Secrets Manager, Bedrock/Bedrock Runtime, CloudWatch Logs, SSM) and the **S3 Gateway endpoint** to keep traffic on the AWS network and reduce NAT cost.  
+Note: the current CDK stack does **not** create endpoints yet. To adopt endpoints, extend `AgenticRagStack` to create the needed endpoints and (optionally) reduce NAT usage.
 
 ```bash
 # In agentic_rag_stack.py, set use_vpc_endpoints=True (and optionally remove NAT),

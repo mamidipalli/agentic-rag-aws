@@ -215,6 +215,16 @@ class AgenticRagStack(Stack):
         )
         authorizer = apigw.CognitoUserPoolsAuthorizer(self, "Authorizer", cognito_user_pools=[user_pool])
 
+        # --- Admin route: POST /admin/ingest -> IngestFn (Cognito-protected) ---
+        res_admin = api.root.add_resource("admin")
+        res_ingest = res_admin.add_resource("ingest")
+        res_ingest.add_method(
+            "POST",
+            apigw.LambdaIntegration(ingest_fn, proxy=True),
+            authorizer=authorizer,
+            authorization_type=apigw.AuthorizationType.COGNITO
+        )
+
         proxy = api.root.add_resource("{proxy+}")
         proxy.add_method("ANY", integ, authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
         api.root.add_method("ANY", integ, authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
