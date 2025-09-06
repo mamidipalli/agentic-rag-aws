@@ -59,32 +59,14 @@ Functional view:
 
 ```
 .
-├─ app/
-│  ├─ main.py                # FastAPI app (health, ask, feedback)
-│  ├─ lambda_handler.py      # Mangum entrypoint
-│  ├─ bedrock.py             # Bedrock (embed/generate)
-│  ├─ retrieval.py           # pgvector queries, SQL, ANN index
-│  ├─ graph.py               # LangGraph graph
-│  ├─ tools.py               # Example tool calls
-│  ├─ metrics.py             # CloudWatch metrics/logs
-│  ├─ config.py              # Settings (env)
-│  └─ ingest_handler.py      # Lambda ingestion entrypoint (S3→SQS→Lambda + backfill)
+├─ app/                 # Lambda code: FastAPI API, ingestion, retrieval, Bedrock wrappers, agent graph, DB init
 ├─ infra/
-│  └─ cdk/
-│     ├─ app.py
-│     ├─ stacks/agentic_rag_stack.py   # VPC, S3(+events), SQS(+DLQ), EventBridge, RDS, Lambdas, API GW, Cognito
-│     ├─ requirements.txt
-│     └─ cdk.json
-├─ sample-docs/              # Sample docs (txt/md/html/pdf) under corp/
-│  └─ *.md
-│  └─ *.txt
-   └─ *.html
-   └─ *.pdf
-├─ scripts/
-│  ├─ get_cognito_jwt.sh     # Fetch ID/Access token via Cognito
-├─ docs/
-│  └─ architecture-functional.png
-   └─ architecture-infrastructure.png
+│  └─ cdk/              # AWS CDK IaC for VPC, RDS, Lambdas, API Gateway, Cognito, S3, SQS, EventBridge, CloudWatch
+├─ sample-docs/         # Example documents to upload to S3 (txt/md/html/pdf under corp/)
+├─ scripts/             # Helper scripts (e.g., get_cognito_jwt.sh)
+├─ docs/                # Architecture diagrams used in the article/README
+├─ tests/               # (optional)
+├─ LICENSE
 └─ README.md
 ```
 
@@ -276,7 +258,7 @@ aws logs tail "/aws/lambda/$API_FN" --since 10m --follow --region ap-south-1
 ```
 
 **Metrics/Dashboard:**  
-The stack creates a simple CloudWatch Dashboard (latency/error rate) and alarms for 5XX/error bursts. Extend in `metrics.py` or CDK as needed.
+The stack creates a simple CloudWatch Dashboard (latency/error rate) and alarms for 5XX/error bursts. Extend in CDK as needed.
 
 ---
 
